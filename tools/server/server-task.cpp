@@ -1565,6 +1565,14 @@ std::string server_task_result_metrics::to_metrics() {
             "spec_decode_num_drafts_total",
             "Speculative: Total speculative decoding verification steps",
             (double) metrics.n_draft_verif_steps
+        }, {
+            "moe_fetch_experts_total",
+            "MoE: experts fetched from host to device memory",
+            (double) metrics.n_moe_fetch_experts
+        }, {
+            "moe_fetch_bytes_total",
+            "MoE: bytes fetched from host to device memory",
+            (double) metrics.n_moe_fetch_bytes
         },
     };
 

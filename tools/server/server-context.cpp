@@ -12,6 +12,7 @@
 #include "common.h"
 #include "fit.h"
 #include "llama.h"
+#include "../../src/llama-ext.h" // staging API: llama_moe_fetch_get
 #include "log.h"
 #include "sampling.h"
 #include "speculative.h"
@@ -2856,6 +2857,13 @@ private:
                         }
                     }
                     SRV_DBG("n_processing_slots = %d\n", n_processing_slots);
+
+                    if (ctx_tgt) {
+                        const auto moe = llama_moe_fetch_get(ctx_tgt);
+                        metrics.n_moe_fetch_calls   = moe.n_calls;
+                        metrics.n_moe_fetch_experts = moe.n_experts;
+                        metrics.n_moe_fetch_bytes   = moe.bytes;
+                    }
 
                     auto res = std::make_unique<server_task_result_metrics>();
                     res->id                  = task.id;

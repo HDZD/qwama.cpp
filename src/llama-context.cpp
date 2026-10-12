@@ -14,8 +14,10 @@
 #include "llama-sampler.h"
 #include "llama.h"
 
+#include <algorithm>
 #include <cinttypes>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -2728,6 +2730,88 @@ ggml_status llama_context::graph_compute(
     return status;
 }
 
+void llama_context::moe_fetch_stats::configure() {
+    if (configured) {
+        return;
+    }
+    configured = true;
+
+    if (const char * env = getenv("LLAMA_MOE_FETCH_LOG_EVERY")) {
+        const int v = atoi(env);
+        if (v > 0) {
+            log_every = (size_t) v;
+        }
+    }
+}
+
+void llama_context::moe_fetch_stats::add(const llama_model & model, const ggml_tensor * w, size_t n, size_t sz) {
+    configure();
+
+    if (layer_bytes.size() != (size_t) model.hparams.n_layer_all) {
+        layer_bytes.assign((size_t) model.hparams.n_layer_all, 0);
+    }
+
+    auto it = layer_of.find(w);
+    if (it == layer_of.end()) {
+        int32_t il = -1;
+        if (strncmp(w->name, "blk.", 4) == 0) {
+            il = (int32_t) strtol(w->name + 4, nullptr, 10);
+        }
+        it = layer_of.emplace(w, il).first;
+    }
+    if (it->second >= 0 && it->second < (int32_t) layer_bytes.size()) {
+        layer_bytes[it->second] += sz;
+    }
+
+    n_calls            += 1;
+    n_experts          += n;
+    bytes              += sz;
+    n_since_log_calls   += 1;
+    n_since_log_experts += n;
+    n_since_log_bytes   += sz;
+
+    maybe_log();
+}
+
+void llama_context::moe_fetch_stats::maybe_log() {
+    if (n_since_log_experts < log_every) {
+        return;
+    }
+
+    LLAMA_LOG_INFO("llama_context: MoE fetch: +%zu calls, +%zu experts, +%.2f MiB since last log (total %.2f MiB)\n",
+            n_since_log_calls, n_since_log_experts, n_since_log_bytes/1024.0/1024.0, bytes/1024.0/1024.0);
+
+    std::vector<std::pair<size_t, size_t>> top; // (bytes, layer)
+    for (size_t il = 0; il < layer_bytes.size(); il++) {
+        if (layer_bytes[il] > 0) {
+            top.emplace_back(layer_bytes[il], il);
+        }
+    }
+    std::sort(top.begin(), top.end(), [](const std::pair<size_t, size_t> & a, const std::pair<size_t, size_t> & b) {
+        return a.first > b.first;
+    });
+
+    std::string s;
+    char buf[64];
+    for (size_t i = 0; i < top.size() && i < 6; i++) {
+        snprintf(buf, sizeof(buf), " blk%zu=%.1fMiB", top[i].second, top[i].first/1024.0/1024.0);
+        s += buf;
+    }
+    LLAMA_LOG_INFO("llama_context: MoE fetch top layers:%s\n", s.c_str());
+
+    n_since_log_calls   = 0;
+    n_since_log_experts = 0;
+    n_since_log_bytes   = 0;
+}
+
+struct llama_moe_fetch_stats llama_context::get_moe_fetch_stats() const {
+    return { (uint64_t) moe_fetch.n_calls, (uint64_t) moe_fetch.n_experts, (uint64_t) moe_fetch.bytes };
+}
+
+struct llama_moe_fetch_stats llama_moe_fetch_get(const struct llama_context * ctx) {
+    return ctx->get_moe_fetch_stats();
+}
+
 bool llama_context::sched_copy_experts(ggml_backend_t backend, const ggml_tensor * src, ggml_tensor * dst, ggml_cgraph * graph, void * user_data) {
     auto * lctx = static_cast<llama_context *>(user_data);
 
@@ -2793,6 +2877,7 @@ bool llama_context::sched_copy_experts(ggml_backend_t backend, const ggml_tensor
             }
             if (next < e) {
                 ggml_backend_tensor_set_async(backend, dst, (const uint8_t *) src->data + next*expert_size, next*expert_size, (e - next)*expert_size);
+                lctx->moe_fetch.add(lctx->model, src, (size_t) (e - next), (size_t) (e - next)*expert_size);
                 lctx->moe_cache->add_large_upload((size_t) (e - next), (size_t) (e - next)*expert_size);
             }
             e   += n;
@@ -2805,8 +2890,11 @@ bool llama_context::sched_copy_experts(ggml_backend_t backend, const ggml_tensor
         const size_t size    = (last + 1 - next)*expert_size + padding;
         if (size > 0) {
             ggml_backend_tensor_set_async(backend, dst, (const uint8_t *) src->data + offset, offset, size);
-            if (lctx->moe_cache && last + 1 > next) {
-                lctx->moe_cache->add_large_upload((size_t) (last + 1 - next), (size_t) (last + 1 - next)*expert_size);
+            if (last + 1 > next) {
+                lctx->moe_fetch.add(lctx->model, src, (size_t) (last + 1 - next), size);
+                if (lctx->moe_cache) {
+                    lctx->moe_cache->add_large_upload((size_t) (last + 1 - next), (size_t) (last + 1 - next)*expert_size);
+                }
             }
         }
 

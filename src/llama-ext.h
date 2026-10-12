@@ -16,6 +16,15 @@ LLAMA_API struct ggml_cgraph * llama_graph_reserve(
         uint32_t n_seqs,
         uint32_t n_outputs);
 
+// Cumulative host -> device MoE expert fetch stats of a context.
+struct llama_moe_fetch_stats {
+    uint64_t n_calls;
+    uint64_t n_experts;
+    uint64_t bytes;
+};
+
+LLAMA_API struct llama_moe_fetch_stats llama_moe_fetch_get(const struct llama_context * ctx);
+
 // Get the default ggml_type for a given ftype.
 LLAMA_API ggml_type llama_ftype_get_default_type(llama_ftype ftype);
 

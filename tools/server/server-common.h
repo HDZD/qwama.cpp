@@ -522,6 +522,11 @@ struct server_metrics {
     uint64_t n_draft_verif_steps = 0; // Total draft token verification steps by the target model
     std::vector<uint64_t> n_accepted_per_pos; // Accepted tokens per draft position
 
+    // cumulative MoE expert fetch counters, refreshed from the context on prediction
+    uint64_t n_moe_fetch_calls   = 0;
+    uint64_t n_moe_fetch_experts = 0;
+    uint64_t n_moe_fetch_bytes   = 0;
+
     void init() {
         t_start = ggml_time_us();
     }

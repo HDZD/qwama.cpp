@@ -262,6 +262,9 @@ public:
 
     bool set_sampler(llama_seq_id seq_id, llama_sampler * sampler);
 
+    // cumulative host -> device MoE expert fetch stats (see llama-ext.h)
+    struct llama_moe_fetch_stats get_moe_fetch_stats() const;
+
 private:
     llm_graph_result * get_gf_res_prev();
 
@@ -376,6 +379,29 @@ private:
     };
 
     copy_experts_info copy_experts;
+
+    // host -> device expert fetches performed by sched_copy_experts, logged periodically
+    struct moe_fetch_stats {
+        size_t n_calls   = 0;
+        size_t n_experts = 0;
+        size_t bytes     = 0;
+
+        size_t log_every  = 262144; // experts fetched between periodic logs, overridden by LLAMA_MOE_FETCH_LOG_EVERY
+        bool   configured = false;
+
+        size_t n_since_log_calls   = 0;
+        size_t n_since_log_experts = 0;
+        size_t n_since_log_bytes   = 0;
+
+        std::map<const ggml_tensor *, int32_t> layer_of;
+        std::vector<size_t> layer_bytes;
+
+        void configure();
+        void add(const llama_model & model, const ggml_tensor * w, size_t n, size_t sz);
+        void maybe_log();
+    };
+
+    moe_fetch_stats moe_fetch;
 
     ggml_backend_t backend_cpu = nullptr;
     std::vector<ggml_backend_ptr> backends;
