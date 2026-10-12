@@ -6,6 +6,7 @@
 #include "ggml-cpp.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <stdexcept>
 #include <unordered_map>
 #include <vector>
@@ -201,6 +202,9 @@ struct llama_moe_cache::impl {
     stats stats_large;
     stats stats_copy;  // experts copied from the cache for large batches
 
+    size_t log_every = 262144; // cache events between periodic stats logs, overridden by LLAMA_MOE_CACHE_LOG_EVERY
+    size_t log_next  = 0;
+
     std::vector<device> devices;
     std::vector<group> groups;
     std::vector<layer> layers;
@@ -220,6 +224,13 @@ struct llama_moe_cache::impl {
 
     impl(const llama_model & model, const std::vector<ggml_backend_t> & backends, const std::vector<ggml_backend_buffer_type_t> & bufts, size_t size) :
             n_expert_used(model.hparams.n_expert_used_max()), layers(model.layers.size()) {
+        if (const char * env = getenv("LLAMA_MOE_CACHE_LOG_EVERY")) {
+            const long v = atol(env);
+            if (v > 0) {
+                log_every = (size_t) v;
+            }
+        }
+
         for (size_t i = 0; i < backends.size(); ++i) {
             const auto dev_type = ggml_backend_dev_type(ggml_backend_get_device(backends[i]));
             if (dev_type == GGML_BACKEND_DEVICE_TYPE_GPU || dev_type == GGML_BACKEND_DEVICE_TYPE_IGPU) {
@@ -508,6 +519,7 @@ struct llama_moe_cache::impl {
 
         stats_copy.hits  += n;
         stats_copy.bytes += ggml_nbytes(src_view);
+        maybe_log();
 
         return n;
     }
@@ -576,6 +588,8 @@ struct llama_moe_cache::impl {
         st.misses += fills.size();
         st.bytes  += bytes;
 
+        maybe_log();
+
         // the next copy synchronizes the backend before it changes the slot map again
         ggml_backend_tensor_set_async(backend, dst, src->data, 0, ggml_nbytes(src));
 
@@ -592,10 +606,27 @@ struct llama_moe_cache::impl {
                 name, st.hits, st.misses, 100.0*st.hits/n, st.bytes/1024.0/1024.0);
         };
         log("ubatch <= 8", stats_small);
-        log("ubatch  > 8", stats_large);
-        if (stats_copy.hits > 0) {
-            LLAMA_LOG_INFO("llama_moe_cache: large batches: %zu experts copied from the cache, %.2f MiB\n", stats_copy.hits, stats_copy.bytes/1024.0/1024.0);
+        if (stats_large.misses > 0 || stats_copy.hits > 0) {
+            const size_t n = stats_copy.hits + stats_large.misses;
+            LLAMA_LOG_INFO("llama_moe_cache: ubatch  > 8 (experts): cached = %zu (%.2f MiB), uploaded = %zu (%.2f MiB), hit rate = %.2f%%\n",
+                stats_copy.hits, stats_copy.bytes/1024.0/1024.0,
+                stats_large.misses, stats_large.bytes/1024.0/1024.0,
+                100.0*stats_copy.hits/n);
         }
+    }
+
+    void maybe_log() {
+        const size_t total = stats_small.hits + stats_small.misses + stats_large.hits + stats_large.misses + stats_copy.hits;
+        if (total >= log_next + log_every) {
+            log_next = total;
+            log_stats();
+        }
+    }
+
+    void add_large_upload(size_t n_experts, size_t bytes) {
+        stats_large.misses += n_experts;
+        stats_large.bytes  += bytes;
+        maybe_log();
     }
 };
 
@@ -604,6 +635,10 @@ llama_moe_cache::llama_moe_cache(const llama_model & model, const std::vector<gg
 }
 
 llama_moe_cache::~llama_moe_cache() = default;
+
+void llama_moe_cache::add_large_upload(size_t n_experts, size_t bytes) {
+    pimpl->add_large_upload(n_experts, bytes);
+}
 
 ggml_backend_t llama_moe_cache::backend(int32_t il) const {
     return pimpl->backend(il);
